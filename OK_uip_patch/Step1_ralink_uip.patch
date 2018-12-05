@@ -1,0 +1,523 @@
+diff --git a/Makefile b/Makefile
+index 9726f3d..1114e6a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -91,6 +91,8 @@ endif
+ endif
+ endif
+ 
++export CONFIG_CROSS_COMPILER_PATH
++
+ ifeq ($(ON_BOARD_DDR1),y)
+ DRAM_TYPE=DDR1
+ endif
+@@ -190,6 +192,13 @@ LIBS += cpu/$(CPU)/$(SOC)/lib$(SOC).a
+ endif
+ LIBS += lib_$(ARCH)/lib$(ARCH).a
+ LIBS += net/libnet.a
++###################################
++# add by Shawn.Luo
++#uip:
++#	$(MAKE) -C ./httpd
++
++LIBS += httpd/libhttpd.a
++########################################3
+ 
+ #LIBS += rtc/librtc.a
+ LIBS += drivers/libdrivers.a
+@@ -1815,6 +1824,7 @@ clean:
+ 	rm -f stage1/stage2.bin stage1/stage1n2.elf stage1/stage1n2.map
+ 	rm -f ./uboot.bin ./uboot.img ./u-boot ./u-boot.* ./uboot_a.bin ./System.map
+ 	rm -f scripts/lxdialog/lxdialog
++	rm -rf httpd/*.o httpd/*.a
+ 
+ clobber:	clean
+ 	find . -type f \( -name .depend \
+diff --git a/include/configs/rt2880.h b/include/configs/rt2880.h
+index f6ee197..d592b06 100644
+--- a/include/configs/rt2880.h
++++ b/include/configs/rt2880.h
+@@ -501,4 +501,41 @@ extern unsigned int  CFG_BLOCKSIZE;
+ #define U2_PHY_BASE             (PHY_BASE+0x800)
+ #endif
+ 
++
++
++// ================================================================================>>>
++/*
++ * Web Failsafe configuration
++*/
++//#define HTTPD_UPLOAD_RAM_ADDRESS            CFG_LOAD_ADDR
++#define HTTPD_UPLOAD_RAM_ADDRESS          0x81000000
++
++// U-Boot partition size and offset
++#define HTTPD_UPLOAD_UBOOT_ADDRESS        CFG_FLASH_BASE
++#define HTTPD_UPLOAD_UBOOT_SIZE_IN_BYTES      ( 128 * 1024 )
++#define UPDATE_SCRIPT_UBOOT_SIZE_IN_BYTES       "0x20000"
++
++// Firmware partition offset
++#define HTTPD_UPLOAD_KERNEL_ADDRESS       CFG_KERN_ADDR
++
++// ART partition size and offset
++#define HTTPD_UPLOAD_ART_ADDRESS          CFG_FACTORY_ADDR
++#define HTTPD_UPLOAD_ART_SIZE_IN_BYTES        ( 64 * 1024 )
++
++// max. firmware size <= (FLASH_SIZE -  HTTPD_UPLOAD_LIMITED_AREA_IN_BYTES)
++//#define HTTPD_UPLOAD_LIMITED_AREA_IN_BYTES    ( 320 * 1024 )
++
++// progress state info
++#define HTTPD_PROGRESS_START          0
++#define HTTPD_PROGRESS_TIMEOUT            1
++#define HTTPD_PROGRESS_UPLOAD_READY       2
++#define HTTPD_PROGRESS_UPGRADE_READY      3
++#define HTTPD_PROGRESS_UPGRADE_FAILED     4
++
++// update type
++#define HTTPD_UPGRADE_TYPE_FIRMWARE       0
++#define HTTPD_UPGRADE_TYPE_UBOOT          1
++#define HTTPD_UPGRADE_TYPE_ART            2
++// <<<================================================================================
++
+ #endif	/* __CONFIG_H */
+diff --git a/lib_generic/string.c b/lib_generic/string.c
+index b14356a..c7a2410 100644
+--- a/lib_generic/string.c
++++ b/lib_generic/string.c
+@@ -39,7 +39,7 @@
+ #define __HAVE_ARCH_STRSWAB
+ #define __HAVE_ARCH_BCOPY
+ #define __HAVE_ARCH_MEMSCAN
+-#define __HAVE_ARCH_STRSTR
++//#define __HAVE_ARCH_STRSTR
+ #define __HAVE_ARCH_MEMCHR
+ #endif
+ #ifndef __HAVE_ARCH_STRNICMP
+diff --git a/lib_mips/board.c b/lib_mips/board.c
+index 68c10c9..0312983 100644
+--- a/lib_mips/board.c
++++ b/lib_mips/board.c
+@@ -887,6 +887,7 @@ __attribute__((nomips16)) void board_init_f(ulong bootflag)
+ #define SEL_LOAD_LINUX_WRITE_FLASH      2
+ #define SEL_BOOT_FLASH                  3
+ #define SEL_ENTER_CLI                   4
++#define SEL_HTTPD	                    5
+ #define SEL_LOAD_BOOT_WRITE_FLASH_BY_SERIAL 7
+ #define SEL_LOAD_BOOT_SDRAM             8
+ #define SEL_LOAD_BOOT_WRITE_FLASH       9
+@@ -901,6 +902,7 @@ void OperationSelect(void)
+ #ifdef RALINK_CMDLINE
+ 	printf("   %d: Entr boot command line interface.\n", SEL_ENTER_CLI);
+ #endif // RALINK_CMDLINE //
++	printf("   %d: Entr Httpd Server[Web Server].\n", SEL_HTTPD);
+ #ifdef RALINK_UPGRADE_BY_SERIAL
+ 	printf("   %d: Load Boot Loader code then write to Flash via Serial. \n", SEL_LOAD_BOOT_WRITE_FLASH_BY_SERIAL);
+ #endif // RALINK_UPGRADE_BY_SERIAL //
+@@ -2236,7 +2238,7 @@ __attribute__((nomips16)) void board_init_r (gd_t *id, ulong dest_addr)
+ #endif
+ #endif // RALINK_UPGRADE_BY_SERIAL //
+ 
+-
++/*
+ #if defined (RALINK_USB) || defined (MTK_USB)
+ #if defined (CFG_ENV_IS_IN_NAND) || defined (CFG_ENV_IS_IN_SPI)
+ 		case '5':
+@@ -2274,6 +2276,14 @@ __attribute__((nomips16)) void board_init_r (gd_t *id, ulong dest_addr)
+ 			break;
+ #endif
+ #endif // RALINK_UPGRADE_BY_USB //
++*/
++		// add by Shawn.Luo
++		case  '5':
++			printf( "was pressed for seconds\n" );
++			printf( "HTTP server is starting for firmware update\n" );
++			eth_initialize(gd->bd);
++			NetLoopHttpd();
++			break;
+ 		case '6':
+ 			auto_load = 1;
+ 			printf("   \n%d: System Load Linux to SDRAM via TFTP [Automatically]. \n", SEL_LOAD_LINUX_SDRAM);
+diff --git a/net/Makefile b/net/Makefile
+index e550e32..eb486a0 100644
+--- a/net/Makefile
++++ b/net/Makefile
+@@ -33,6 +33,11 @@ all:	$(LIB)
+ $(LIB):	$(START) $(OBJS)
+ 	$(AR) crv $@ $(OBJS)
+ 
++# ../httpd/unix/uipopt.h:554:19: httpd.h: No such file or directory
++CFLAGS += -I../httpd/apps/httpd \
++		  -I../httpd/unix \
++		  -I../httpd/uip
++
+ #########################################################################
+ 
+ .depend:	Makefile $(OBJS:.o=.c)
+diff --git a/net/net.c b/net/net.c
+index 77b0340..a04ed44 100644
+--- a/net/net.c
++++ b/net/net.c
+@@ -82,11 +82,27 @@
+ #include <miiphy.h>
+ #endif
+ 
++
++//-------------------------------------------------
++#include "uipopt.h"
++#include "uip.h"
++#include "uip_arp.h"
++#include <configs/rt2880.h>
++
++int webfailsafe_upgrade_type = HTTPD_UPGRADE_TYPE_FIRMWARE;  //select type: uboot,kernel,eeprom/art
++int httpd_is_running = 0; 
++int webfailsafe_is_running = 0; 
++int webfailsafe_ready_for_upgrade = 0; 
++void NetReceiveHttpd( volatile uchar * inpkt, int len );
++extern int do_reset( cmd_tbl_t *cmdtp, int flag, int argc, char *argv[] );
++//-------------------------------------------------
++
++
+ #if (CONFIG_COMMANDS & CFG_CMD_NET)
+ 
+-#define ARP_TIMEOUT		3		/* Seconds before trying ARP again */
++#define ARP_TIMEOUT		5		/* Seconds before trying ARP again */
+ #ifndef	CONFIG_NET_RETRY_COUNT
+-# define ARP_TIMEOUT_COUNT	8		/* # of timeouts before giving up  */
++# define ARP_TIMEOUT_COUNT	5		/* # of timeouts before giving up  */
+ #else
+ # define ARP_TIMEOUT_COUNT  (CONFIG_NET_RETRY_COUNT)
+ #endif
+@@ -1134,6 +1150,12 @@ NetReceive(volatile uchar * inpkt, int len)
+ 	printf("packet received\n");
+ #endif
+ 
++	if ( httpd_is_running )
++	{
++		NetReceiveHttpd(inpkt, len);
++		return;
++	}
++
+ 	NetRxPkt = inpkt;
+ 	NetRxPktLen = len;
+ 	et = (Ethernet_t *)inpkt;
+@@ -1729,3 +1751,321 @@ IPaddr_t getenv_IPaddr (char *var)
+ 	return (string_to_ip(getenv(var)));
+ }
+ 
++
++
++
++/**********************************************************************************
++ * HTTPD section
++*/
++#define BUF	((struct uip_eth_hdr *)&uip_buf[0])
++static int arptimer = 0;
++
++void NetSendHttpd( void )
++{
++	volatile uchar *tmpbuf = NetTxPacket;
++	int i;
++
++	for ( i = 0; i < 40 + UIP_LLH_LEN; i++ ) {
++		tmpbuf[i] = uip_buf[i];
++	}
++
++	for( ; i < uip_len; i++ ) {
++		tmpbuf[i] = uip_appdata[ i - 40 - UIP_LLH_LEN ];
++	}
++
++	eth_send( NetTxPacket, uip_len );
++}
++
++
++void NetReceiveHttpd( volatile uchar * inpkt, int len )
++{
++	memcpy( uip_buf, ( const void * )inpkt, len );
++	uip_len = len;
++
++	if ( BUF->type == htons( UIP_ETHTYPE_IP ) )
++	{
++		uip_arp_ipin();
++		uip_input();
++
++		if ( uip_len > 0 ) {
++			uip_arp_out();
++			NetSendHttpd();
++		}
++	}
++	else if( BUF->type == htons( UIP_ETHTYPE_ARP ) )
++	{
++		uip_arp_arpin();
++
++		if ( uip_len > 0 ) {
++			NetSendHttpd();
++		}
++	}
++}
++
++void HttpdHandler( void )
++{
++	int i;
++
++	if ( uip_len == 0 ) {
++		for ( i = 0; i < UIP_CONNS; i++ )
++		{
++			uip_periodic( i );
++			if ( uip_len > 0 ) {
++				uip_arp_out();
++				NetSendHttpd();
++			}
++		}
++
++		if ( ++arptimer == 20 ) {
++			uip_arp_timer();
++			arptimer = 0;
++		}
++	} else {
++		if ( BUF->type == htons( UIP_ETHTYPE_IP ) ) {
++			uip_arp_ipin();
++			uip_input();
++			if ( uip_len > 0 ) {
++				uip_arp_out();
++				NetSendHttpd();
++			}
++		} else if ( BUF->type == htons( UIP_ETHTYPE_ARP ) ) {
++			uip_arp_arpin();
++			if ( uip_len > 0 ) {
++				NetSendHttpd();
++			}
++		}
++	}
++
++}
++
++// start http daemon
++void HttpdStart( void )
++{
++	uip_init();
++	httpd_init();
++}
++
++
++int do_http_upgrade( const ulong size, const int upgrade_type )
++{
++	if ( upgrade_type == HTTPD_UPGRADE_TYPE_UBOOT ) {
++		printf( "\n\n****************************\n*     U-BOOT UPGRADING     *\n* DO NOT POWER OFF DEVICE! *\n****************************\n\n" );
++		return( raspi_erase_write( ( u8_t * )HTTPD_UPLOAD_RAM_ADDRESS, HTTPD_UPLOAD_UBOOT_ADDRESS - CFG_FLASH_BASE, HTTPD_UPLOAD_UBOOT_SIZE_IN_BYTES ) );
++
++	} else if ( upgrade_type == HTTPD_UPGRADE_TYPE_FIRMWARE ) {
++		printf( "\n\n****************************\n*    FIRMWARE UPGRADING    *\n* DO NOT POWER OFF DEVICE! *\n****************************\n\n" );
++		return( raspi_erase_write( ( u8_t * )HTTPD_UPLOAD_RAM_ADDRESS, HTTPD_UPLOAD_KERNEL_ADDRESS - CFG_FLASH_BASE, size ) );
++
++	} else if ( upgrade_type == HTTPD_UPGRADE_TYPE_ART ) {
++		printf( "\n\n****************************\n*      ART  UPGRADING      *\n* DO NOT POWER OFF DEVICE! *\n****************************\n\n" );
++		return( raspi_erase_write( ( u8_t * )HTTPD_UPLOAD_RAM_ADDRESS, HTTPD_UPLOAD_ART_ADDRESS - CFG_FLASH_BASE, HTTPD_UPLOAD_ART_SIZE_IN_BYTES ) );
++	}
++	else
++		return -1;
++
++	return 0;
++}
++
++/* *************************************
++ *
++ * HTTP web server for web failsafe mode
++ *
++ ***************************************/
++int NetLoopHttpd( void )
++{
++	DECLARE_GLOBAL_DATA_PTR;
++	bd_t *bd = gd->bd;
++	unsigned short int ip[2];
++	unsigned char ethinit_attempt = 0;
++	struct uip_eth_addr eaddr;
++
++#ifdef CONFIG_NET_MULTI
++	NetRestarted = 0;
++	NetDevExists = 0;
++#endif
++
++	/* XXX problem with bss workaround */
++	NetArpWaitPacketMAC	= NULL;
++	NetArpWaitTxPacket	= NULL;
++	NetArpWaitPacketIP	= 0;
++	NetArpWaitReplyIP	= 0;
++	NetArpWaitTxPacket	= NULL;
++#ifdef DEBUG	
++   printf("File: %s, Func: %s, Line: %d\n", __FILE__,__FUNCTION__ , __LINE__);
++#endif   
++//
++   
++	if ( !NetTxPacket ) {
++		int	i;
++		BUFFER_ELEM *buf;
++		/*
++		 *	Setup packet buffers, aligned correctly.
++		 */
++		buf = rt2880_free_buf_entry_dequeue( &rt2880_free_buf_list ); 
++		NetTxPacket = buf->pbuf;
++
++		debug( "\n NetTxPacket = 0x%08X \n", NetTxPacket );
++		for ( i = 0; i < NUM_RX_DESC; i++ ) {
++
++			buf = rt2880_free_buf_entry_dequeue( &rt2880_free_buf_list ); 
++			if ( buf == NULL ) {
++				printf("\n Packet Buffer is empty ! \n");
++				return ( -1 );
++			}
++			NetRxPackets[i] = buf->pbuf;
++			printf( "\n NetRxPackets[%d] = 0x%08X\n",i,NetRxPackets[i] );
++		}
++	}
++	
++	NetTxPacket = KSEG1ADDR( NetTxPacket );
++
++	printf("\n KSEG1ADDR(NetTxPacket) = 0x%08X \n",NetTxPacket);
++
++	if ( !NetArpWaitTxPacket ) {
++		NetArpWaitTxPacket = &NetArpWaitPacketBuf[0] + ( PKTALIGN - 1 );
++		NetArpWaitTxPacket -= ( ulong )NetArpWaitTxPacket % PKTALIGN;
++		NetArpWaitTxPacketSize = 0;
++	}
++
++
++	// redo label
++redo:
++	printf("\n NetLoopHttpd,call eth_halt ! \n");
++	eth_halt();
++#ifdef CONFIG_NET_MULTI
++	eth_set_current();
++#endif
++
++	while( ethinit_attempt < 10 ) {
++		if ( eth_init( bd ) ) {
++			ethinit_attempt = 0;
++			break;
++		} else {
++			ethinit_attempt++;
++			eth_halt();
++			udelay( 1000000 );
++		}
++	}
++
++	if ( ethinit_attempt > 0 ) {
++		eth_halt();
++		printf( "## Error: couldn't initialize eth (cable disconnected?)!\n\n" );
++		return( -1 );
++	}
++
++	// get MAC address
++#ifdef CONFIG_NET_MULTI
++	memcpy( NetOurEther, eth_get_dev()->enetaddr, 6 );
++#else
++	memcpy( NetOurEther, bd->bi_enetaddr, 6 );
++#endif
++
++	eaddr.addr[0] = NetOurEther[0];
++	eaddr.addr[1] = NetOurEther[1];
++	eaddr.addr[2] = NetOurEther[2];
++	eaddr.addr[3] = NetOurEther[3];
++	eaddr.addr[4] = NetOurEther[4];
++	eaddr.addr[5] = NetOurEther[5];
++
++	// set MAC address
++	uip_setethaddr( eaddr );
++
++	// set ip and other addresses
++	// TODO: do we need this with uIP stack?
++	NetCopyIP( &NetOurIP, &bd->bi_ip_addr );
++
++	NetOurGatewayIP		= getenv_IPaddr( "gatewayip" );
++	NetOurSubnetMask	= getenv_IPaddr( "netmask" );
++#ifdef CONFIG_NET_VLAN
++	NetOurVLAN		= getenv_VLAN( "vlan" );
++	NetOurNativeVLAN	= getenv_VLAN( "nvlan" );
++#endif
++
++	// start server...
++	IPaddr_t tmp_ip_addr = ntohl( bd->bi_ip_addr );
++	printf( "HTTP server is starting at IP: %ld.%ld.%ld.%ld\n", ( tmp_ip_addr & 0xff000000 ) >> 24, ( tmp_ip_addr & 0x00ff0000 ) >> 16, ( tmp_ip_addr & 0x0000ff00 ) >> 8, ( tmp_ip_addr & 0x000000ff ) );
++	
++	HttpdStart();
++
++	// set local host ip address
++	ip[0] = htons( ( tmp_ip_addr & 0xFFFF0000 ) >> 16 );
++	ip[1] = htons( tmp_ip_addr & 0x0000FFFF );
++
++	uip_sethostaddr( ip );
++
++	// set network mask (255.255.255.0 -> local network)
++	ip[0] = htons( ( ( 0xFFFFFF00 & 0xFFFF0000 ) >> 16 ) );
++	ip[1] = htons( ( 0xFFFFFF00 & 0x0000FFFF ) );
++
++	uip_setnetmask( ip );
++
++	// should we also set default router ip address?
++	//uip_setdraddr();
++
++	printf("Setup httpd starting\n");
++	httpd_is_running = 1;
++
++	// infinite loop
++	for ( ; ; ) {
++
++		/*
++		 *	Check the ethernet for a new packet.
++		 *	The ethernet receive routine will process it.
++		 */
++		if ( eth_rx() > 0 ) {
++			HttpdHandler();
++		}
++
++		// if CTRL+C was pressed -> return!
++		if ( ctrlc() ) {
++			eth_halt();
++
++			// reset global variables to default state
++			httpd_is_running = 0;
++			webfailsafe_ready_for_upgrade = 0;
++			webfailsafe_upgrade_type = HTTPD_UPGRADE_TYPE_FIRMWARE;
++
++			/* Invalidate the last protocol */
++			//eth_set_last_protocol( BOOTP );
++
++			printf( "\nWeb failsafe mode aborted!\n\n" );
++			return( -1 );
++		}
++
++		// until upload is not completed, get back to the start of the loop
++		if ( !webfailsafe_ready_for_upgrade ) {
++			continue;
++		}
++
++		// stop eth interface
++		eth_halt();
++
++		// show progress
++		printf("HTTPD_PROGRESS UPLOAD_READY \n");
++
++		// try to make upgrade!
++		if ( do_http_upgrade( NetBootFileXferSize, webfailsafe_upgrade_type ) >= 0 ) {
++			printf("HTTPD_PROGRESS UPGRADE_READY\n");
++            // wait 1 sec
++            udelay( 1000000 );
++		
++			/* reset the board */
++			do_reset( NULL, 0, 0, NULL );
++		}
++		break;
++	}
++
++	// reset global variables to default state
++	httpd_is_running = 0;
++	webfailsafe_ready_for_upgrade = 0;
++	webfailsafe_upgrade_type = HTTPD_UPGRADE_TYPE_FIRMWARE;
++
++	NetBootFileXferSize = 0;
++
++	printf("HTTPD_PROGRESS UPGRADE_FAILED\n");
++
++	// go to redo
++	goto redo;
++
++	return( -1 );
++}

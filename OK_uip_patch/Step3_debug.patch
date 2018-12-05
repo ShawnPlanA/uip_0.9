@@ -1,0 +1,190 @@
+diff --git a/httpd/apps/httpd/httpd.c b/httpd/apps/httpd/httpd.c
+index 8ad3778..4408a6e 100644
+--- a/httpd/apps/httpd/httpd.c
++++ b/httpd/apps/httpd/httpd.c
+@@ -82,7 +82,7 @@ static void print_httpd_downloading( void ){
+ // http server init
+ void httpd_init( void ) {
+ 	fs_init();
+-	uip_listen( HTONS( 80 ) );
++	uip_listen( HTONS( 80 ) ); // 开始监听端口; 监听80端口
+ }
+ 
+ // reset app state
+@@ -244,7 +244,7 @@ void httpd_appcall(void){
+ 			hs = (struct httpd_state *)(uip_conn->appstate);
+ 
+ 			// closed connection
+-			if(uip_closed()){
++			if(uip_closed()){ // 连接被关闭
+ 				goto out_error;
+ 			}
+ 
+@@ -262,13 +262,13 @@ void httpd_appcall(void){
+ 			}
+ 
+ 			// new connection
+-			if(uip_connected()){
++			if(uip_connected()){ // 接收到连接请求
+ 				httpd_state_reset();
+ 				return;
+ 			}
+ 
+ 			// new data in STATE_NONE
+-			if(uip_newdata() && hs->state == STATE_NONE){
++			if(uip_newdata() && hs->state == STATE_NONE){ // 在当前连接上收到新的数据
+ 
+ 				// GET or POST request?
+ 				if(uip_appdata[0] == ISO_G && uip_appdata[1] == ISO_E && uip_appdata[2] == ISO_T && (uip_appdata[3] == ISO_space || uip_appdata[3] == ISO_tab)){
+@@ -318,7 +318,7 @@ void httpd_appcall(void){
+ 					hs->upload = fsfile.len;
+ 
+ 					// send first (and maybe the last) chunk of data
+-					uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload));
++					uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload)); //  在当前连接发送数据
+ 					return;
+ 
+ 				} else if(hs->state == STATE_UPLOAD_REQUEST){
+@@ -452,7 +452,7 @@ void httpd_appcall(void){
+ 			} /* uip_newdata() && hs->state == STATE_NONE */
+ 
+ 			// if we got ACK from remote host
+-			if(uip_acked()){
++			if(uip_acked()){ //  发出去的数据被应答
+ 
+ 				// if we are in STATE_FILE_REQUEST state
+ 				if(hs->state == STATE_FILE_REQUEST){
+@@ -480,7 +480,7 @@ void httpd_appcall(void){
+ 					hs->dataptr += uip_conn->len;
+ 					hs->upload -= uip_conn->len;
+ 
+-					uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload));
++					uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload)); //  在当前连接发送数据
+ 				}
+ 
+ 				return;
+@@ -493,7 +493,7 @@ void httpd_appcall(void){
+ 				// if we are in STATE_FILE_REQUEST state
+ 				if(hs->state == STATE_FILE_REQUEST){
+ 					// send again chunk of data without changing pointer and length of data left to send
+-					uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload));
++					uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload)); //  在当前连接发送数据
+ 				}
+ 
+ 				return;
+@@ -501,7 +501,7 @@ void httpd_appcall(void){
+ 			}
+ 
+ 			// if we got new data frome remote host
+-			if(uip_newdata()){
++			if(uip_newdata()){ // 在当前连接上收到新的数据
+ 
+ 				// if we are in STATE_UPLOAD_REQUEST state
+ 				if(hs->state == STATE_UPLOAD_REQUEST){
+@@ -553,7 +553,7 @@ void httpd_appcall(void){
+ 						hs->dataptr = (u8_t *)fsfile.data;
+ 						hs->upload = fsfile.len;
+ 
+-						uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload));
++						uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload)); //  在当前连接发送数据
+ 					}
+ 
+ 				}
+diff --git a/httpd/uip/uip.c b/httpd/uip/uip.c
+old mode 100644
+new mode 100755
+index 120c48e..deb35af
+--- a/httpd/uip/uip.c
++++ b/httpd/uip/uip.c
+@@ -73,13 +73,13 @@ header fields and finally send the packet back to the peer.
+ 
+ /* The IP address of this host. If it is defined to be fixed (by setting UIP_FIXEDADDR to 1 in uipopt.h), the address is set here. Otherwise, the address */
+ #if UIP_FIXEDADDR > 0
+-const u16_t uip_hostaddr[2] =
++const u16_t uip_hostaddr[2] = // 默认IP地址：  192.168.0.1
+   {HTONS((UIP_IPADDR0 << 8) | UIP_IPADDR1),
+    HTONS((UIP_IPADDR2 << 8) | UIP_IPADDR3)};
+ const u16_t uip_arp_draddr[2] =
+-  {HTONS((UIP_DRIPADDR0 << 8) | UIP_DRIPADDR1),
++  {HTONS((UIP_DRIPADDR0 << 8) | UIP_DRIPADDR1), //默认路由表： 192.168.0.1
+    HTONS((UIP_DRIPADDR2 << 8) | UIP_DRIPADDR3)};
+-const u16_t uip_arp_netmask[2] =
++const u16_t uip_arp_netmask[2] = // 子码掩码：255.255.255.0
+   {HTONS((UIP_NETMASK0 << 8) | UIP_NETMASK1),
+    HTONS((UIP_NETMASK2 << 8) | UIP_NETMASK3)};
+ #else
+diff --git a/net/net.c b/net/net.c
+old mode 100644
+new mode 100755
+index d5e345b..fdae042
+--- a/net/net.c
++++ b/net/net.c
+@@ -1785,7 +1785,7 @@ void NetReceiveHttpd( volatile uchar * inpkt, int len )
+ 	if ( BUF->type == htons( UIP_ETHTYPE_IP ) )
+ 	{
+ 		uip_arp_ipin();
+-		uip_input();
++		uip_input(); // 处理输入包
+ 
+ 		if ( uip_len > 0 ) {
+ 			uip_arp_out();
+@@ -1802,17 +1802,17 @@ void NetReceiveHttpd( volatile uchar * inpkt, int len )
+ 	}
+ }
+ 
+-void HttpdHandler( void )
++void HttpdHandler( void ) // 解析 接收到的网络数据包, TCP协议
+ {
+ 	int i;
+ 
+ 	if ( uip_len == 0 ) {
+ 		for ( i = 0; i < UIP_CONNS; i++ )
+ 		{
+-			uip_periodic( i );
++			uip_periodic( i ); //处理周期计时事件
+ 			if ( uip_len > 0 ) {
+-				uip_arp_out();
+-				NetSendHttpd();
++				uip_arp_out(); // 封装要输出的 ARP协议数据;
++				NetSendHttpd(); // 发送 ARP协议数据  包;
+ 			}
+ 		}
+ 
+@@ -1829,7 +1829,7 @@ void HttpdHandler( void )
+ 				NetSendHttpd();
+ 			}
+ 		} else if ( BUF->type == htons( UIP_ETHTYPE_ARP ) ) {
+-			uip_arp_arpin();
++			uip_arp_arpin(); // 更新本地ARP缓存表
+ 			if ( uip_len > 0 ) {
+ 				NetSendHttpd();
+ 			}
+@@ -1841,7 +1841,7 @@ void HttpdHandler( void )
+ // start http daemon
+ void HttpdStart( void )
+ {
+-	uip_init();
++	uip_init(); // 初始化uip协议栈
+ 	httpd_init();
+ }
+ 
+@@ -1930,7 +1930,7 @@ int NetLoopHttpd( void )
+ 
+ 	// redo label
+ redo:
+-	printf("\n NetLoopHttpd,call eth_halt ! \n");
++	printf("\n NetLoopHttpd, call eth_halt ! \n");
+ 	eth_halt();
+ #ifdef CONFIG_NET_MULTI
+ 	eth_set_current();
+@@ -2052,7 +2048,9 @@ redo:
+ 			printf("HTTPD_PROGRESS UPGRADE_READY\n");
+             // wait 1 sec
+             udelay( 1000000 );
+-		
++	
++			uip_stop(); //  告诉对方要停止连接
++			uip_close(); // 主动关闭连接
+ 			/* reset the board */
+ 			do_reset( NULL, 0, 0, NULL );
+ 		}

@@ -1,0 +1,1358 @@
+From 675f573d5d7ab1b6fd2addd457d7894d8af39cf0 Mon Sep 17 00:00:00 2001
+From: "Shawn.Luo" <strugglelg@gmail.com>
+Date: Mon, 12 Nov 2018 18:03:55 +0800
+Subject: [PATCH] xxx
+
+---
+ apps/httpd/httpd.c     | 915 +++++++++++++++++++++++++----------------
+ apps/httpd/httpd.c.org | 371 +++++++++++++++++
+ apps/httpd/httpd.h     |   2 +
+ unix/uipopt.h          |   2 +-
+ 4 files changed, 934 insertions(+), 356 deletions(-)
+ create mode 100644 apps/httpd/httpd.c.org
+ mode change 100644 => 100755 apps/httpd/httpd.h
+
+diff --git a/apps/httpd/httpd.c b/apps/httpd/httpd.c
+index ad927d0..8ad3778 100644
+--- a/apps/httpd/httpd.c
++++ b/apps/httpd/httpd.c
+@@ -1,371 +1,576 @@
+-/**
+- * \addtogroup exampleapps
+- * @{
+- */
+-
+-/**
+- * \defgroup httpd Web server
+- * @{
+- *
+- * The uIP web server is a very simplistic implementation of an HTTP
+- * server. It can serve web pages and files from a read-only ROM
+- * filesystem, and provides a very small scripting language.
+- *
+- * The script language is very simple and works as follows. Each
+- * script line starts with a command character, either "i", "t", "c",
+- * "#" or ".".  The "i" command tells the script interpreter to
+- * "include" a file from the virtual file system and output it to the
+- * web browser. The "t" command should be followed by a line of text
+- * that is to be output to the browser. The "c" command is used to
+- * call one of the C functions from the httpd-cgi.c file. A line that
+- * starts with a "#" is ignored (i.e., the "#" denotes a comment), and
+- * the "." denotes the last script line.
+- *
+- * The script that produces the file statistics page looks somewhat
+- * like this:
+- *
+- \code
+-i /header.html
+-t <h1>File statistics</h1><br><table width="100%">
+-t <tr><td><a href="/index.html">/index.html</a></td><td>
+-c a /index.html
+-t </td></tr> <tr><td><a href="/cgi/files">/cgi/files</a></td><td>
+-c a /cgi/files
+-t </td></tr> <tr><td><a href="/cgi/tcp">/cgi/tcp</a></td><td>
+-c a /cgi/tcp
+-t </td></tr> <tr><td><a href="/404.html">/404.html</a></td><td>
+-c a /404.html
+-t </td></tr></table>
+-i /footer.plain
+-.
+- \endcode
+- *
+- */
+-
+-
+-/**
+- * \file
+- * HTTP server.
+- * \author Adam Dunkels <adam@dunkels.com>
+- */
+-
+-/*
+- * Copyright (c) 2001, Adam Dunkels.
+- * All rights reserved. 
+- *
+- * Redistribution and use in source and binary forms, with or without 
+- * modification, are permitted provided that the following conditions 
+- * are met: 
+- * 1. Redistributions of source code must retain the above copyright 
+- *    notice, this list of conditions and the following disclaimer. 
+- * 2. Redistributions in binary form must reproduce the above copyright 
+- *    notice, this list of conditions and the following disclaimer in the 
+- *    documentation and/or other materials provided with the distribution. 
+- * 3. The name of the author may not be used to endorse or promote
+- *    products derived from this software without specific prior
+- *    written permission.  
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
+- * OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+- * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.  
+- *
+- * This file is part of the uIP TCP/IP stack.
+- *
+- * $Id: httpd.c,v 1.28.2.6 2003/10/07 13:22:27 adam Exp $
+- *
+- */
+-
+-
+ #include "uip.h"
+ #include "httpd.h"
+ #include "fs.h"
+ #include "fsdata.h"
+-#include "cgi.h"
+-
+-#define NULL (void *)0
+-
+-/* The HTTP server states: */
+-#define HTTP_NOGET        0
+-#define HTTP_FILE         1
+-#define HTTP_TEXT         2
+-#define HTTP_FUNC         3
+-#define HTTP_END          4
+-
+-#ifdef DEBUG
+-#include <stdio.h>
+-#define PRINT(x) printf("%s", x)
+-#define PRINTLN(x) printf("%s\n", x)
+-#else /* DEBUG */
+-#define PRINT(x)
+-#define PRINTLN(x)
+-#endif /* DEBUG */
+ 
+-struct httpd_state *hs;
++#include <configs/rt2880.h>
++#include <stdio.h> // `NULL' undeclared here (not in a function)
++
++#define STATE_NONE				0		// empty state (waiting for request...)
++#define STATE_FILE_REQUEST		1		// remote host sent GET request
++#define STATE_UPLOAD_REQUEST	2		// remote host sent POST request
++
++// ASCII characters
++#define ISO_G					0x47	// GET
++#define ISO_E					0x45
++#define ISO_T					0x54
++#define ISO_P					0x50	// POST
++#define ISO_O					0x4f
++#define ISO_S					0x53
++#define ISO_T					0x54
++#define ISO_slash				0x2f	// control and other characters
++#define ISO_space				0x20
++#define ISO_nl					0x0a
++#define ISO_cr					0x0d
++#define ISO_tab					0x09
+ 
++// we use this so that we can do without the ctype library
++#define is_digit(c)				((c) >= '0' && (c) <= '9')
++
++// debug
++//#define DEBUG_UIP
++
++// html files
+ extern const struct fsdata_file file_index_html;
+ extern const struct fsdata_file file_404_html;
++extern const struct fsdata_file file_flashing_html;
++extern const struct fsdata_file file_fail_html;
++
++extern int webfailsafe_ready_for_upgrade;
++extern int webfailsafe_upgrade_type;
++extern unsigned long NetBootFileXferSize;
++unsigned char *webfailsafe_data_pointer = NULL;
++
++// extern flash_info_t flash_info[];
++
++// http app state
++struct httpd_state *hs;
++
++static int webfailsafe_post_done = 0;
++static int webfailsafe_upload_failed = 0;
++static int data_start_found = 0;
++
++static unsigned char post_packet_counter = 0;
++
++// 0x0D -> CR 0x0A -> LF
++static char eol[3] = { 0x0d, 0x0a, 0x00 };
++static char eol2[5] = { 0x0d, 0x0a, 0x0d, 0x0a, 0x00 };
++
++static char *boundary_value;
+ 
+-static void next_scriptline(void);
+-static void next_scriptstate(void);
+-
+-#define ISO_G        0x47
+-#define ISO_E        0x45
+-#define ISO_T        0x54
+-#define ISO_slash    0x2f    
+-#define ISO_c        0x63
+-#define ISO_g        0x67
+-#define ISO_i        0x69
+-#define ISO_space    0x20
+-#define ISO_nl       0x0a
+-#define ISO_cr       0x0d
+-#define ISO_a        0x61
+-#define ISO_t        0x74
+-#define ISO_hash     0x23
+-#define ISO_period   0x2e
+-
+-
+-/*-----------------------------------------------------------------------------------*/
+-/**
+- * Initialize the web server.
+- *
+- * Starts to listen for incoming connection requests on TCP port 80.
+- */
+-/*-----------------------------------------------------------------------------------*/
+-void
+-httpd_init(void)
+-{
+-  fs_init();
+-  
+-  /* Listen to port 80. */
+-  uip_listen(HTONS(80));
++// str to int
++static int atoi(const char *s){
++	int i = 0;
++
++	while(is_digit(*s)){
++		i = i * 10 + *(s++) - '0';
++	}
++
++	return(i);
+ }
+-/*-----------------------------------------------------------------------------------*/
+-void
+-httpd_appcall(void)
+-{
+-  struct fs_file fsfile;  
+-
+-  u8_t i;
+-
+-  switch(uip_conn->lport) {
+-    /* This is the web server: */
+-  case HTONS(80):
+-    /* Pick out the application state from the uip_conn structure. */
+-    hs = (struct httpd_state *)(uip_conn->appstate);
+-
+-    /* We use the uip_ test functions to deduce why we were
+-       called. If uip_connected() is non-zero, we were called
+-       because a remote host has connected to us. If
+-       uip_newdata() is non-zero, we were called because the
+-       remote host has sent us new data, and if uip_acked() is
+-       non-zero, the remote host has acknowledged the data we
+-       previously sent to it. */
+-    if(uip_connected()) {
+-      /* Since we have just been connected with the remote host, we
+-         reset the state for this connection. The ->count variable
+-         contains the amount of data that is yet to be sent to the
+-         remote host, and the ->state is set to HTTP_NOGET to signal
+-         that we haven't received any HTTP GET request for this
+-         connection yet. */
+-      hs->state = HTTP_NOGET;
+-      hs->count = 0;
+-      return;
+-
+-    } else if(uip_poll()) {
+-      /* If we are polled ten times, we abort the connection. This is
+-         because we don't want connections lingering indefinately in
+-         the system. */
+-      if(hs->count++ >= 10) {
+-	uip_abort();
+-      }
+-      return;
+-    } else if(uip_newdata() && hs->state == HTTP_NOGET) {
+-      /* This is the first data we receive, and it should contain a
+-	 GET. */
+-      
+-      /* Check for GET. */
+-      if(uip_appdata[0] != ISO_G ||
+-	 uip_appdata[1] != ISO_E ||
+-	 uip_appdata[2] != ISO_T ||
+-	 uip_appdata[3] != ISO_space) {
+-	/* If it isn't a GET, we abort the connection. */
+-	uip_abort();
+-	return;
+-      }
+-	       
+-      /* Find the file we are looking for. */
+-      for(i = 4; i < 40; ++i) {
+-	if(uip_appdata[i] == ISO_space ||
+-	   uip_appdata[i] == ISO_cr ||
+-	   uip_appdata[i] == ISO_nl) {
+-	  uip_appdata[i] = 0;
+-	  break;
++
++// print downloading progress
++static void print_httpd_downloading( void ){
++	if ( post_packet_counter == 8 ) {
++		puts("#");
++		post_packet_counter = 0;
+ 	}
+-      }
+-
+-      PRINT("request for file ");
+-      PRINTLN(&uip_appdata[4]);
+-      
+-      /* Check for a request for "/". */
+-      if(uip_appdata[4] == ISO_slash &&
+-	 uip_appdata[5] == 0) {
+-	fs_open(file_index_html.name, &fsfile);    
+-      } else {
+-	if(!fs_open((const char *)&uip_appdata[4], &fsfile)) {
+-	  PRINTLN("couldn't open file");
+-	  fs_open(file_404_html.name, &fsfile);
++
++	post_packet_counter++;
++}
++
++// http server init
++void httpd_init( void ) {
++	fs_init();
++	uip_listen( HTONS( 80 ) );
++}
++
++// reset app state
++static void httpd_state_reset(void){
++	hs->state = STATE_NONE;
++	hs->count = 0;
++	hs->dataptr = 0;
++	hs->upload = 0;
++	hs->upload_total = 0;
++
++	data_start_found = 0;
++	post_packet_counter = 0;
++
++	if(boundary_value){
++		free(boundary_value);
+ 	}
+-      } 
+-
+-
+-      if(uip_appdata[4] == ISO_slash &&
+-	 uip_appdata[5] == ISO_c &&
+-	 uip_appdata[6] == ISO_g &&
+-	 uip_appdata[7] == ISO_i &&
+-	 uip_appdata[8] == ISO_slash) {
+-	/* If the request is for a file that starts with "/cgi/", we
+-           prepare for invoking a script. */	
+-	hs->script = fsfile.data;
+-	next_scriptstate();
+-      } else {
+-	hs->script = NULL;
+-	/* The web server is now no longer in the HTTP_NOGET state, but
+-	   in the HTTP_FILE state since is has now got the GET from
+-	   the client and will start transmitting the file. */
+-	hs->state = HTTP_FILE;
+-
+-	/* Point the file pointers in the connection state to point to
+-	   the first byte of the file. */
+-	hs->dataptr = fsfile.data;
+-	hs->count = fsfile.len;	
+-      }     
+-    }
+-
+-    
+-    if(hs->state != HTTP_FUNC) {
+-      /* Check if the client (remote end) has acknowledged any data that
+-	 we've previously sent. If so, we move the file pointer further
+-	 into the file and send back more data. If we are out of data to
+-	 send, we close the connection. */
+-      if(uip_acked()) {
+-	if(hs->count >= uip_conn->len) {
+-	  hs->count -= uip_conn->len;
+-	  hs->dataptr += uip_conn->len;
+-	} else {
+-	  hs->count = 0;
++}
++
++// find and get first chunk of data
++//  webfailsafe_upgrade_type = "uboot / art / firmware" 
++static int httpd_findandstore_firstchunk(void){
++	char *start = NULL;
++	char *end = NULL;
++//	flash_info_t *info = &flash_info[0];
++
++	if ( !boundary_value ) {
++		return(0);
+ 	}
+-	
+-	if(hs->count == 0) {
+-	  if(hs->script != NULL) {
+-	    next_scriptline();
+-	    next_scriptstate();
+-	  } else {
+-	    uip_close();
+-	  }
++
++	// chek if we have data in packet
++	start = ( char * )strstr( ( char * )uip_appdata, ( char * )boundary_value );
++
++	if ( start ) {
++
++		// ok, we have data in this packet!
++		// find upgrade type
++
++		end = ( char * )strstr( ( char * )start, "name=\"firmware\"" );
++
++		if ( end ) {
++
++			printf( "Upgrade type: firmware\n" );
++			webfailsafe_upgrade_type = HTTPD_UPGRADE_TYPE_FIRMWARE;
++
++		} else {
++
++			end = ( char * )strstr( ( char * )start, "name=\"uboot\"" );
++
++			if ( end ) {
++#if defined(HTTPD_DISABLE_UBOOT_UPGRADE)
++				printf("## Error: U-Boot upgrade is not allowed on this board!\n");
++				webfailsafe_upload_failed = 1;
++#else
++				webfailsafe_upgrade_type = HTTPD_UPGRADE_TYPE_UBOOT;
++				printf("Upgrade type: U-Boot\n");
++#endif /* if defined(HTTPD_DISABLE_UBOOT_UPGRADE) */
++			} else {
++
++				end = (char *)strstr((char *)start, "name=\"art\"");
++
++				if(end){
++#if defined(HTTPD_DISABLE_ART_UPGRADE)
++					printf("## Error: U-Boot upgrade is not allowed on this board!\n");
++					webfailsafe_upload_failed = 1;
++#else
++					printf("Upgrade type: ART\n");
++					webfailsafe_upgrade_type = HTTPD_UPGRADE_TYPE_ART;
++
++					// if we don't have ART partition offset, it means that it should be
++					// stored on the last 64 KiB block -> in most supported board
++					// the ART partition occupies last 64 KiB block
++/* #if !defined(HTTPD_UPLOAD_ART_ADDRESS)
++					// if we don't know the flash type, we won't allow to update ART,
++					// because we don't know flash size
++					if(info->flash_id == FLASH_CUSTOM){
++						printf("## Error: unknown FLASH type, can't update ART!\n");
++						webfailsafe_upload_failed = 1;
++					}
++#endif */
++#endif /* if defined(HTTPD_DISABLE_ART_UPGRADE) */
++				} else {
++
++					printf("## Error: input name not found!\n");
++					return(0);
++
++				}
++
++			}
++
++		}
++
++		end = NULL;
++
++		// find start position of the data!
++		end = (char *)strstr((char *)start, eol2);
++
++		if(end){
++
++			if((end - (char *)uip_appdata) < uip_len){
++
++				// move pointer over CR LF CR LF
++				end += 4;
++
++				// how much data we expect?
++				// last part (magic value 6): [CR][LF](boundary length)[-][-][CR][LF]
++				hs->upload_total = hs->upload_total - (int)(end - start) - strlen(boundary_value) - 6;
++
++				printf("Upload file size: %d bytes\n", hs->upload_total);
++
++				// We need to check if file which we are going to download
++				// has correct size (for every type of upgrade)
++
++				// U-Boot
++				if((webfailsafe_upgrade_type == HTTPD_UPGRADE_TYPE_UBOOT) && (hs->upload_total != HTTPD_UPLOAD_UBOOT_SIZE_IN_BYTES)){
++
++					printf("## Error: wrong file size, should be: %d bytes!\n", HTTPD_UPLOAD_UBOOT_SIZE_IN_BYTES);
++					webfailsafe_upload_failed = 1;
++
++				// ART
++				} else if((webfailsafe_upgrade_type == HTTPD_UPGRADE_TYPE_ART) && (hs->upload_total != HTTPD_UPLOAD_ART_SIZE_IN_BYTES)){
++
++					printf("## Error: wrong file size, should be: %d bytes!\n", HTTPD_UPLOAD_ART_SIZE_IN_BYTES);
++					webfailsafe_upload_failed = 1;
++				}
++
++				printf("Loading: ");
++
++				// how much data we are storing now?
++				hs->upload = (unsigned int)(uip_len - (end - (char *)uip_appdata));
++
++				memcpy((void *)webfailsafe_data_pointer, (void *)end, hs->upload);
++				webfailsafe_data_pointer += hs->upload;
++
++				print_httpd_downloading();
++				
++				return(1);
++
++			}
++
++		} else {
++			printf("## Error: couldn't find start of data!\n");
++		}
++
+ 	}
+-      }         
+-    } else {
+-      /* Call the CGI function. */
+-      if(cgitab[hs->script[2] - ISO_a](uip_acked())) {
+-	/* If the function returns non-zero, we jump to the next line
+-           in the script. */
+-	next_scriptline();
+-	next_scriptstate();
+-      }
+-    }
+-
+-    if(hs->state != HTTP_FUNC && !uip_poll()) {
+-      /* Send a piece of data, but not more than the MSS of the
+-	 connection. */
+-      uip_send(hs->dataptr, hs->count);
+-    }
+-
+-    /* Finally, return to uIP. Our outgoing packet will soon be on its
+-       way... */
+-    return;
+-
+-  default:
+-    /* Should never happen. */
+-    uip_abort();
+-    break;
+-  }  
+-}
+-/*-----------------------------------------------------------------------------------*/
+-/* next_scriptline():
+- *
+- * Reads the script until it finds a newline. */
+-static void
+-next_scriptline(void)
+-{
+-  /* Loop until we find a newline character. */
+-  do {
+-    ++(hs->script);
+-  } while(hs->script[0] != ISO_nl);
+-
+-  /* Eat up the newline as well. */
+-  ++(hs->script);
++
++	return(0);
+ }
+-/*-----------------------------------------------------------------------------------*/
+-/* next_sciptstate:
+- *
+- * Reads one line of script and decides what to do next.
+- */
+-static void
+-next_scriptstate(void)
+-{
+-  struct fs_file fsfile;
+-  u8_t i;
+-
+- again:
+-  switch(hs->script[0]) {
+-  case ISO_t:
+-    /* Send a text string. */
+-    hs->state = HTTP_TEXT;
+-    hs->dataptr = &hs->script[2];
+-
+-    /* Calculate length of string. */
+-    for(i = 0; hs->dataptr[i] != ISO_nl; ++i);
+-    hs->count = i;    
+-    break;
+-  case ISO_c:
+-    /* Call a function. */
+-    hs->state = HTTP_FUNC;
+-    hs->dataptr = NULL;
+-    hs->count = 0;
+-    cgitab[hs->script[2] - ISO_a](0);
+-    break;
+-  case ISO_i:   
+-    /* Include a file. */
+-    hs->state = HTTP_FILE;
+-    if(!fs_open(&hs->script[2], &fsfile)) {
+-      uip_abort();
+-    }
+-    hs->dataptr = fsfile.data;
+-    hs->count = fsfile.len;
+-    break;
+-  case ISO_hash:
+-    /* Comment line. */
+-    next_scriptline();
+-    goto again;
+-    break;
+-  case ISO_period:
+-    /* End of script. */
+-    hs->state = HTTP_END;
+-    uip_close();
+-    break;
+-  default:
+-    uip_abort();
+-    break;
+-  }
++
++// called for http server app
++void httpd_appcall(void){
++	struct fs_file fsfile;
++	unsigned int i;
++
++	switch(uip_conn->lport){
++
++		case HTONS(80):
++
++			// app state
++			hs = (struct httpd_state *)(uip_conn->appstate);
++
++			// closed connection
++			if(uip_closed()){
++				goto out_error;
++			}
++
++			// aborted connection or time out occured
++			if(uip_aborted() || uip_timedout()){
++				goto out_error;
++			}
++
++			// if we are pooled
++			if(uip_poll()){
++				if(hs->count++ >= 100){
++					goto out_error;
++				}
++				return;
++			}
++
++			// new connection
++			if(uip_connected()){
++				httpd_state_reset();
++				return;
++			}
++
++			// new data in STATE_NONE
++			if(uip_newdata() && hs->state == STATE_NONE){
++
++				// GET or POST request?
++				if(uip_appdata[0] == ISO_G && uip_appdata[1] == ISO_E && uip_appdata[2] == ISO_T && (uip_appdata[3] == ISO_space || uip_appdata[3] == ISO_tab)){
++					hs->state = STATE_FILE_REQUEST;
++				} else if(uip_appdata[0] == ISO_P && uip_appdata[1] == ISO_O && uip_appdata[2] == ISO_S && uip_appdata[3] == ISO_T && (uip_appdata[4] == ISO_space || uip_appdata[4] == ISO_tab)){
++					hs->state = STATE_UPLOAD_REQUEST;
++				}
++
++				// anything else -> abort the connection!
++				if(hs->state == STATE_NONE){
++					goto out_error;
++				}
++
++				// get file or firmware upload?
++				if(hs->state == STATE_FILE_REQUEST){
++
++					// we are looking for GET file name
++					for(i = 4; i < 30; i++){
++						if(uip_appdata[i] == ISO_space || uip_appdata[i] == ISO_cr || uip_appdata[i] == ISO_nl || uip_appdata[i] == ISO_tab){
++							uip_appdata[i] = 0;
++							i = 0;
++							break;
++						}
++					}
++
++					if(i != 0){
++						printf("## Error: request file name too long!\n");
++						goto out_error;
++					}
++
++					printf("Request for: ");
++					printf("%s\n", &uip_appdata[4]);
++
++					// request for /
++					if(uip_appdata[4] == ISO_slash && uip_appdata[5] == 0){
++						fs_open(file_index_html.name, &fsfile);
++					} else {
++						// check if we have requested file
++						if(!fs_open((const char *)&uip_appdata[4], &fsfile)){
++							printf("## Error: file not found!\n");
++							fs_open(file_404_html.name, &fsfile);
++						}
++					}
++
++					hs->state = STATE_FILE_REQUEST;
++					hs->dataptr = (u8_t *)fsfile.data;
++					hs->upload = fsfile.len;
++
++					// send first (and maybe the last) chunk of data
++					uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload));
++					return;
++
++				} else if(hs->state == STATE_UPLOAD_REQUEST){
++
++					char *start = NULL;
++					char *end = NULL;
++
++					// end bufor data with NULL
++					uip_appdata[uip_len] = '\0';
++
++					/*
++					 * We got first packet with POST request
++					 *
++					 * Some browsers don't include first chunk of data in the first
++					 * POST request packet (like Google Chrome, IE and Safari)!
++					 * So we must now find two values:
++					 * - Content-Length
++					 * - boundary
++					 * Headers with these values can be in any order!
++					 * If we don't find these values in first packet, connection will be aborted!
++					 *
++					 */
++
++					// Content-Length pos
++					start = (char *)strstr((char*)uip_appdata, "Content-Length:");
++
++					if(start){
++
++						start += sizeof("Content-Length:");
++
++						// find end of the line with "Content-Length:"
++						end = (char *)strstr(start, eol);
++
++						if(end){
++
++							hs->upload_total = atoi(start);
++#ifdef DEBUG_UIP
++							printf("Expecting %d bytes in body request message\n", hs->upload_total);
++#endif
++
++						} else {
++							printf("## Error: couldn't find \"Content-Length\"!\n");
++							goto out_error;
++						}
++
++					} else {
++						printf("## Error: couldn't find \"Content-Length\"!\n");
++						goto out_error;
++					}
++
++					// we don't support very small files (< 10 KB)
++					if(hs->upload_total < 10240){
++						printf("## Error: request for upload < 10 KB data!\n");
++						goto out_error;
++					}
++
++					// boundary value
++					start = NULL;
++					end = NULL;
++
++					start = (char *)strstr((char *)uip_appdata, "boundary=");
++
++					if(start){
++
++						// move pointer over "boundary="
++						start += 9;
++
++						// find end of line with boundary value
++						end = (char *)strstr((char *)start, eol);
++
++						if(end){
++
++							// malloc space for boundary value + '--' and '\0'
++							boundary_value = (char*)malloc(end - start + 3);
++
++							if(boundary_value){
++
++								memcpy(&boundary_value[2], start, end - start);
++
++								// add -- at the begin and 0 at the end
++								boundary_value[0] = '-';
++								boundary_value[1] = '-';
++								boundary_value[end - start + 2] = 0;
++
++#ifdef DEBUG_UIP
++								printf("Found boundary value: \"%s\"\n", boundary_value);
++#endif
++
++							} else {
++								printf("## Error: couldn't allocate memory for boundary!\n");
++								goto out_error;
++							}
++
++						} else {
++							printf("## Error: couldn't find boundary!\n");
++							goto out_error;
++						}
++
++					} else {
++						printf("## Error: couldn't find boundary!\n");
++						goto out_error;
++					}
++
++					/*
++					 * OK, if we are here, it means that we found
++					 * Content-Length and boundary values in headers
++					 *
++					 * We can now try to 'allocate memory' and
++					 * find beginning of the data in first packet
++					 */
++
++					webfailsafe_data_pointer = (u8_t *)HTTPD_UPLOAD_RAM_ADDRESS;
++
++					if(!webfailsafe_data_pointer){
++						printf("## Error: couldn't allocate RAM for data!\n");
++						goto out_error;
++					} else {
++						printf("Data will be downloaded at 0x%X in RAM\n", HTTPD_UPLOAD_RAM_ADDRESS);
++					}
++
++					if(httpd_findandstore_firstchunk()){
++						data_start_found = 1;
++					} else {
++						data_start_found = 0;
++					}
++
++					return;
++
++				} /* else if(hs->state == STATE_UPLOAD_REQUEST) */
++
++			} /* uip_newdata() && hs->state == STATE_NONE */
++
++			// if we got ACK from remote host
++			if(uip_acked()){
++
++				// if we are in STATE_FILE_REQUEST state
++				if(hs->state == STATE_FILE_REQUEST){
++
++					// data which we send last time was received (we got ACK)
++					// if we send everything last time -> gently close the connection
++					if(hs->upload <= uip_mss()){
++
++						// post upload completed?
++						if(webfailsafe_post_done){
++
++							if(!webfailsafe_upload_failed){
++								webfailsafe_ready_for_upgrade = 1;
++							}
++
++							webfailsafe_post_done = 0;
++							webfailsafe_upload_failed = 0;
++						}
++
++						goto out_error;;
++					}
++
++					// otherwise, send another chunk of data
++					// last time we sent uip_conn->len size of data
++					hs->dataptr += uip_conn->len;
++					hs->upload -= uip_conn->len;
++
++					uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload));
++				}
++
++				return;
++
++			}
++
++			// if we need to retransmit
++			if(uip_rexmit()){
++
++				// if we are in STATE_FILE_REQUEST state
++				if(hs->state == STATE_FILE_REQUEST){
++					// send again chunk of data without changing pointer and length of data left to send
++					uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload));
++				}
++
++				return;
++
++			}
++
++			// if we got new data frome remote host
++			if(uip_newdata()){
++
++				// if we are in STATE_UPLOAD_REQUEST state
++				if(hs->state == STATE_UPLOAD_REQUEST){
++
++					// end bufor data with NULL
++					uip_appdata[uip_len] = '\0';
++
++					// do we have to find start of data?
++					if(!data_start_found){
++
++						if(!httpd_findandstore_firstchunk()){
++							printf("## Error: couldn't find start of data in next packet!\n");
++							goto out_error;
++						} else {
++							data_start_found = 1;
++						}
++
++						return;
++					}
++
++					hs->upload += (unsigned int)uip_len;
++
++					if(!webfailsafe_upload_failed){
++						memcpy((void *)webfailsafe_data_pointer, (void *)uip_appdata, uip_len);
++						webfailsafe_data_pointer += uip_len;
++					}
++
++					print_httpd_downloading();
++
++					// if we have collected all data
++					if(hs->upload >= hs->upload_total){
++
++						printf("\n\n");
++
++						// end of post upload
++						webfailsafe_post_done = 1;
++						NetBootFileXferSize = (unsigned long)hs->upload_total;
++
++						// which website will be returned
++						if(!webfailsafe_upload_failed){
++							fs_open(file_flashing_html.name, &fsfile);
++						} else {
++							fs_open(file_fail_html.name, &fsfile);
++						}
++
++						httpd_state_reset();
++
++						hs->state = STATE_FILE_REQUEST;
++						hs->dataptr = (u8_t *)fsfile.data;
++						hs->upload = fsfile.len;
++
++						uip_send(hs->dataptr, (hs->upload > uip_mss() ? uip_mss() : hs->upload));
++					}
++
++				}
++
++				return;
++			}
++			break;
++
++		default:
++			// we shouldn't get here... we are listening only on port 80
++			uip_abort();
++			break;
++	}
++	return;
++
++out_error:
++		httpd_state_reset();
++		uip_abort();
++		return;
+ }
+-/*-----------------------------------------------------------------------------------*/
+-/** @} */
+-/** @} */
+diff --git a/apps/httpd/httpd.c.org b/apps/httpd/httpd.c.org
+new file mode 100644
+index 0000000..ad927d0
+--- /dev/null
++++ b/apps/httpd/httpd.c.org
+@@ -0,0 +1,371 @@
++/**
++ * \addtogroup exampleapps
++ * @{
++ */
++
++/**
++ * \defgroup httpd Web server
++ * @{
++ *
++ * The uIP web server is a very simplistic implementation of an HTTP
++ * server. It can serve web pages and files from a read-only ROM
++ * filesystem, and provides a very small scripting language.
++ *
++ * The script language is very simple and works as follows. Each
++ * script line starts with a command character, either "i", "t", "c",
++ * "#" or ".".  The "i" command tells the script interpreter to
++ * "include" a file from the virtual file system and output it to the
++ * web browser. The "t" command should be followed by a line of text
++ * that is to be output to the browser. The "c" command is used to
++ * call one of the C functions from the httpd-cgi.c file. A line that
++ * starts with a "#" is ignored (i.e., the "#" denotes a comment), and
++ * the "." denotes the last script line.
++ *
++ * The script that produces the file statistics page looks somewhat
++ * like this:
++ *
++ \code
++i /header.html
++t <h1>File statistics</h1><br><table width="100%">
++t <tr><td><a href="/index.html">/index.html</a></td><td>
++c a /index.html
++t </td></tr> <tr><td><a href="/cgi/files">/cgi/files</a></td><td>
++c a /cgi/files
++t </td></tr> <tr><td><a href="/cgi/tcp">/cgi/tcp</a></td><td>
++c a /cgi/tcp
++t </td></tr> <tr><td><a href="/404.html">/404.html</a></td><td>
++c a /404.html
++t </td></tr></table>
++i /footer.plain
++.
++ \endcode
++ *
++ */
++
++
++/**
++ * \file
++ * HTTP server.
++ * \author Adam Dunkels <adam@dunkels.com>
++ */
++
++/*
++ * Copyright (c) 2001, Adam Dunkels.
++ * All rights reserved. 
++ *
++ * Redistribution and use in source and binary forms, with or without 
++ * modification, are permitted provided that the following conditions 
++ * are met: 
++ * 1. Redistributions of source code must retain the above copyright 
++ *    notice, this list of conditions and the following disclaimer. 
++ * 2. Redistributions in binary form must reproduce the above copyright 
++ *    notice, this list of conditions and the following disclaimer in the 
++ *    documentation and/or other materials provided with the distribution. 
++ * 3. The name of the author may not be used to endorse or promote
++ *    products derived from this software without specific prior
++ *    written permission.  
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
++ * OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
++ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
++ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
++ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.  
++ *
++ * This file is part of the uIP TCP/IP stack.
++ *
++ * $Id: httpd.c,v 1.28.2.6 2003/10/07 13:22:27 adam Exp $
++ *
++ */
++
++
++#include "uip.h"
++#include "httpd.h"
++#include "fs.h"
++#include "fsdata.h"
++#include "cgi.h"
++
++#define NULL (void *)0
++
++/* The HTTP server states: */
++#define HTTP_NOGET        0
++#define HTTP_FILE         1
++#define HTTP_TEXT         2
++#define HTTP_FUNC         3
++#define HTTP_END          4
++
++#ifdef DEBUG
++#include <stdio.h>
++#define PRINT(x) printf("%s", x)
++#define PRINTLN(x) printf("%s\n", x)
++#else /* DEBUG */
++#define PRINT(x)
++#define PRINTLN(x)
++#endif /* DEBUG */
++
++struct httpd_state *hs;
++
++extern const struct fsdata_file file_index_html;
++extern const struct fsdata_file file_404_html;
++
++static void next_scriptline(void);
++static void next_scriptstate(void);
++
++#define ISO_G        0x47
++#define ISO_E        0x45
++#define ISO_T        0x54
++#define ISO_slash    0x2f    
++#define ISO_c        0x63
++#define ISO_g        0x67
++#define ISO_i        0x69
++#define ISO_space    0x20
++#define ISO_nl       0x0a
++#define ISO_cr       0x0d
++#define ISO_a        0x61
++#define ISO_t        0x74
++#define ISO_hash     0x23
++#define ISO_period   0x2e
++
++
++/*-----------------------------------------------------------------------------------*/
++/**
++ * Initialize the web server.
++ *
++ * Starts to listen for incoming connection requests on TCP port 80.
++ */
++/*-----------------------------------------------------------------------------------*/
++void
++httpd_init(void)
++{
++  fs_init();
++  
++  /* Listen to port 80. */
++  uip_listen(HTONS(80));
++}
++/*-----------------------------------------------------------------------------------*/
++void
++httpd_appcall(void)
++{
++  struct fs_file fsfile;  
++
++  u8_t i;
++
++  switch(uip_conn->lport) {
++    /* This is the web server: */
++  case HTONS(80):
++    /* Pick out the application state from the uip_conn structure. */
++    hs = (struct httpd_state *)(uip_conn->appstate);
++
++    /* We use the uip_ test functions to deduce why we were
++       called. If uip_connected() is non-zero, we were called
++       because a remote host has connected to us. If
++       uip_newdata() is non-zero, we were called because the
++       remote host has sent us new data, and if uip_acked() is
++       non-zero, the remote host has acknowledged the data we
++       previously sent to it. */
++    if(uip_connected()) {
++      /* Since we have just been connected with the remote host, we
++         reset the state for this connection. The ->count variable
++         contains the amount of data that is yet to be sent to the
++         remote host, and the ->state is set to HTTP_NOGET to signal
++         that we haven't received any HTTP GET request for this
++         connection yet. */
++      hs->state = HTTP_NOGET;
++      hs->count = 0;
++      return;
++
++    } else if(uip_poll()) {
++      /* If we are polled ten times, we abort the connection. This is
++         because we don't want connections lingering indefinately in
++         the system. */
++      if(hs->count++ >= 10) {
++	uip_abort();
++      }
++      return;
++    } else if(uip_newdata() && hs->state == HTTP_NOGET) {
++      /* This is the first data we receive, and it should contain a
++	 GET. */
++      
++      /* Check for GET. */
++      if(uip_appdata[0] != ISO_G ||
++	 uip_appdata[1] != ISO_E ||
++	 uip_appdata[2] != ISO_T ||
++	 uip_appdata[3] != ISO_space) {
++	/* If it isn't a GET, we abort the connection. */
++	uip_abort();
++	return;
++      }
++	       
++      /* Find the file we are looking for. */
++      for(i = 4; i < 40; ++i) {
++	if(uip_appdata[i] == ISO_space ||
++	   uip_appdata[i] == ISO_cr ||
++	   uip_appdata[i] == ISO_nl) {
++	  uip_appdata[i] = 0;
++	  break;
++	}
++      }
++
++      PRINT("request for file ");
++      PRINTLN(&uip_appdata[4]);
++      
++      /* Check for a request for "/". */
++      if(uip_appdata[4] == ISO_slash &&
++	 uip_appdata[5] == 0) {
++	fs_open(file_index_html.name, &fsfile);    
++      } else {
++	if(!fs_open((const char *)&uip_appdata[4], &fsfile)) {
++	  PRINTLN("couldn't open file");
++	  fs_open(file_404_html.name, &fsfile);
++	}
++      } 
++
++
++      if(uip_appdata[4] == ISO_slash &&
++	 uip_appdata[5] == ISO_c &&
++	 uip_appdata[6] == ISO_g &&
++	 uip_appdata[7] == ISO_i &&
++	 uip_appdata[8] == ISO_slash) {
++	/* If the request is for a file that starts with "/cgi/", we
++           prepare for invoking a script. */	
++	hs->script = fsfile.data;
++	next_scriptstate();
++      } else {
++	hs->script = NULL;
++	/* The web server is now no longer in the HTTP_NOGET state, but
++	   in the HTTP_FILE state since is has now got the GET from
++	   the client and will start transmitting the file. */
++	hs->state = HTTP_FILE;
++
++	/* Point the file pointers in the connection state to point to
++	   the first byte of the file. */
++	hs->dataptr = fsfile.data;
++	hs->count = fsfile.len;	
++      }     
++    }
++
++    
++    if(hs->state != HTTP_FUNC) {
++      /* Check if the client (remote end) has acknowledged any data that
++	 we've previously sent. If so, we move the file pointer further
++	 into the file and send back more data. If we are out of data to
++	 send, we close the connection. */
++      if(uip_acked()) {
++	if(hs->count >= uip_conn->len) {
++	  hs->count -= uip_conn->len;
++	  hs->dataptr += uip_conn->len;
++	} else {
++	  hs->count = 0;
++	}
++	
++	if(hs->count == 0) {
++	  if(hs->script != NULL) {
++	    next_scriptline();
++	    next_scriptstate();
++	  } else {
++	    uip_close();
++	  }
++	}
++      }         
++    } else {
++      /* Call the CGI function. */
++      if(cgitab[hs->script[2] - ISO_a](uip_acked())) {
++	/* If the function returns non-zero, we jump to the next line
++           in the script. */
++	next_scriptline();
++	next_scriptstate();
++      }
++    }
++
++    if(hs->state != HTTP_FUNC && !uip_poll()) {
++      /* Send a piece of data, but not more than the MSS of the
++	 connection. */
++      uip_send(hs->dataptr, hs->count);
++    }
++
++    /* Finally, return to uIP. Our outgoing packet will soon be on its
++       way... */
++    return;
++
++  default:
++    /* Should never happen. */
++    uip_abort();
++    break;
++  }  
++}
++/*-----------------------------------------------------------------------------------*/
++/* next_scriptline():
++ *
++ * Reads the script until it finds a newline. */
++static void
++next_scriptline(void)
++{
++  /* Loop until we find a newline character. */
++  do {
++    ++(hs->script);
++  } while(hs->script[0] != ISO_nl);
++
++  /* Eat up the newline as well. */
++  ++(hs->script);
++}
++/*-----------------------------------------------------------------------------------*/
++/* next_sciptstate:
++ *
++ * Reads one line of script and decides what to do next.
++ */
++static void
++next_scriptstate(void)
++{
++  struct fs_file fsfile;
++  u8_t i;
++
++ again:
++  switch(hs->script[0]) {
++  case ISO_t:
++    /* Send a text string. */
++    hs->state = HTTP_TEXT;
++    hs->dataptr = &hs->script[2];
++
++    /* Calculate length of string. */
++    for(i = 0; hs->dataptr[i] != ISO_nl; ++i);
++    hs->count = i;    
++    break;
++  case ISO_c:
++    /* Call a function. */
++    hs->state = HTTP_FUNC;
++    hs->dataptr = NULL;
++    hs->count = 0;
++    cgitab[hs->script[2] - ISO_a](0);
++    break;
++  case ISO_i:   
++    /* Include a file. */
++    hs->state = HTTP_FILE;
++    if(!fs_open(&hs->script[2], &fsfile)) {
++      uip_abort();
++    }
++    hs->dataptr = fsfile.data;
++    hs->count = fsfile.len;
++    break;
++  case ISO_hash:
++    /* Comment line. */
++    next_scriptline();
++    goto again;
++    break;
++  case ISO_period:
++    /* End of script. */
++    hs->state = HTTP_END;
++    uip_close();
++    break;
++  default:
++    uip_abort();
++    break;
++  }
++}
++/*-----------------------------------------------------------------------------------*/
++/** @} */
++/** @} */
+diff --git a/apps/httpd/httpd.h b/apps/httpd/httpd.h
+old mode 100644
+new mode 100755
+index a56221c..752c5e2
+--- a/apps/httpd/httpd.h
++++ b/apps/httpd/httpd.h
+@@ -61,6 +61,8 @@ struct httpd_state {
+   u16_t count;
+   char *dataptr;
+   char *script;
++  unsigned int upload;
++  unsigned int upload_total;
+ };
+ 
+ 
+diff --git a/unix/uipopt.h b/unix/uipopt.h
+index bbf3ef0..f9c7f78 100644
+--- a/unix/uipopt.h
++++ b/unix/uipopt.h
+@@ -114,7 +114,7 @@ typedef unsigned short uip_stats_t;
+  *
+  * \hideinitializer
+  */
+-#define UIP_FIXEDADDR    1
++#define UIP_FIXEDADDR    0
+ 
+ /**
+  * Ping IP address asignment.
+-- 
+2.19.1
+
